@@ -14,20 +14,29 @@ cd amphetamine-cli
 make install
 ```
 
-The default installation creates a self-contained CLI and agent skill in your home directory:
+`make install` always installs the CLI and asks independently whether to enable its agent skill for Codex and Claude Code:
 
-- `~/.local/bin/amphetamine` — the CLI executable
-- `~/.agents/skills/amphetamine/SKILL.md` — the Codex agent skill
-
-The skill directory also contains a small ownership marker so uninstall can distinguish this project's files from somebody else's. Nothing links back to the cloned repository, so you can remove the clone after installation. Restart Codex if the new skill is not discovered in an existing session.
-
-To make the same installed skill available to Claude Code without maintaining a second copy, add its discovery link:
-
-```sh
-make install-claude-skill
+```text
+Enable the Amphetamine skill for Codex? [y/n] y
+Enable the Amphetamine skill for Claude Code? [y/n] y
 ```
 
-This creates `~/.claude/skills/amphetamine` as a symlink to the canonical skill under `~/.agents/skills`. It refuses to replace an existing file, directory, or different symlink at that location.
+The default destinations are:
+
+- `~/.local/bin/amphetamine` — the CLI executable
+- `~/.local/share/amphetamine-cli/skills/amphetamine/SKILL.md` — one canonical skill copy, created when either agent is selected
+- `~/.agents/skills/amphetamine` — a Codex discovery link, created only when selected
+- `~/.claude/skills/amphetamine` — a Claude Code discovery link, created only when selected
+
+The canonical skill directory contains a small ownership marker so uninstall can distinguish this project's files from somebody else's. Nothing links back to the cloned repository, so you can remove the clone after installation. Restart an existing agent session if the newly enabled skill is not discovered immediately.
+
+For an unattended installation, provide both choices explicitly:
+
+```sh
+make install INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=no
+```
+
+Each value must be `yes` or `no`. If input is unavailable and either choice is missing, installation stops before making changes. A `no` skips adding that agent's discovery link; removing previously installed links is the job of `make uninstall`.
 
 Set `PREFIX` to install the executable elsewhere:
 
@@ -35,7 +44,7 @@ Set `PREFIX` to install the executable elsewhere:
 make install PREFIX=/your/prefix
 ```
 
-The skill remains in the standard user discovery directory. Advanced installations can override `SKILLSDIR` and `CLAUDE_SKILLSDIR`; pass those same values to later install and uninstall commands.
+Advanced installations can override `SKILL_DATA_ROOT`, `CODEX_SKILLSDIR`, and `CLAUDE_SKILLSDIR`; pass those same values to later install and uninstall commands.
 
 Make sure the selected `bin` directory is on `PATH`. On the first CLI command, macOS may ask the calling terminal or agent app for permission to control Amphetamine; allow it under System Settings → Privacy & Security → Automation.
 
@@ -55,25 +64,30 @@ If you installed with a custom prefix, pass the same value when uninstalling:
 make uninstall PREFIX=/your/prefix
 ```
 
-`make uninstall` removes the executable, the skill installed by this project, and the exact Claude discovery link if you created it. It refuses to remove a skill directory that it did not install.
+`make uninstall` removes the executable, the canonical skill installed by this project, and both installer-owned Codex and Claude Code discovery links. It refuses to remove a canonical skill directory that it did not install.
 
 Without the source directory, the equivalent safe removal for a default installation is:
 
 ```sh
-skill_dir="$HOME/.agents/skills/amphetamine"
+skill_dir="$HOME/.local/share/amphetamine-cli/skills/amphetamine"
+codex_link="$HOME/.agents/skills/amphetamine"
 claude_link="$HOME/.claude/skills/amphetamine"
-
-if [ -f "$skill_dir/.installed-by-amphetamine-cli" ] &&
-   [ -L "$claude_link" ] &&
-   [ "$(readlink "$claude_link")" = "$skill_dir" ]; then
-  rm -f "$claude_link"
-fi
 
 rm -f "$HOME/.local/bin/amphetamine"
 
-if [ -f "$skill_dir/.installed-by-amphetamine-cli" ]; then
+if [ ! -L "$skill_dir" ] &&
+   [ -f "$skill_dir/.installed-by-amphetamine-cli" ] &&
+   [ ! -L "$skill_dir/.installed-by-amphetamine-cli" ]; then
+  if [ -L "$codex_link" ] && [ "$(readlink "$codex_link")" = "$skill_dir" ]; then
+    rm -f "$codex_link"
+  fi
+  if [ -L "$claude_link" ] && [ "$(readlink "$claude_link")" = "$skill_dir" ]; then
+    rm -f "$claude_link"
+  fi
   rm -f "$skill_dir/SKILL.md" "$skill_dir/.installed-by-amphetamine-cli"
   rmdir "$skill_dir" 2>/dev/null || true
+  rmdir "${skill_dir%/*}" 2>/dev/null || true
+  rmdir "$HOME/.local/share/amphetamine-cli" 2>/dev/null || true
 fi
 ```
 

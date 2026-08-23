@@ -336,17 +336,26 @@ test_mutating_json_contract() {
   record_pass 'all mutating commands return the JSON status contract'
 }
 
-test_portable_install_and_uninstall() {
+test_guided_install_and_uninstall() {
   reset_fakes
-  local portable_home=$TEST_TMP/portable-home
+  local portable_home=$TEST_TMP/guided-home
   local installed_binary=$portable_home/.local/bin/amphetamine
-  local installed_skill=$portable_home/.agents/skills/amphetamine/SKILL.md
+  local skill_store=$portable_home/.local/share/amphetamine-cli/skills/amphetamine
+  local codex_link=$portable_home/.agents/skills/amphetamine
   local claude_link=$portable_home/.claude/skills/amphetamine
+  local answers=$TEST_TMP/guided-answers
+  local install_output install_status
 
-  if ! make -s -C "$ROOT" install HOME="$portable_home"; then
-    record_fail 'make install completes'
+  printf 'yes\nyes\n' > "$answers"
+  install_output=$(make -s -C "$ROOT" install HOME="$portable_home" < "$answers" 2>&1)
+  install_status=$?
+  if [ "$install_status" -ne 0 ]; then
+    printf '%s\n' "$install_output" >&2
+    record_fail 'guided make install completes'
     return
   fi
+  assert_contains "$install_output" 'Enable the Amphetamine skill for Codex?' 'installer asks about Codex' || return
+  assert_contains "$install_output" 'Enable the Amphetamine skill for Claude Code?' 'installer asks about Claude Code' || return
   if [ -L "$installed_binary" ] || [ ! -x "$installed_binary" ]; then
     record_fail 'make install creates an executable copy'
     return
@@ -355,41 +364,138 @@ test_portable_install_and_uninstall() {
     record_fail 'make install preserves the binary contents'
     return
   fi
-  if [ -L "${installed_skill%/*}" ] || ! cmp -s "$ROOT/skill/SKILL.md" "$installed_skill"; then
-    record_fail 'make install creates a self-contained canonical skill copy'
+  if [ -L "$skill_store" ] || ! cmp -s "$ROOT/skill/SKILL.md" "$skill_store/SKILL.md"; then
+    record_fail 'make install creates one self-contained canonical skill copy'
     return
   fi
-  if ! make -s -C "$ROOT" install-claude-skill HOME="$portable_home"; then
-    record_fail 'make install-claude-skill completes'
+  if [ ! -L "$codex_link" ] || [ "$(readlink "$codex_link")" != "$skill_store" ]; then
+    record_fail 'guided install links Codex to the canonical skill'
     return
   fi
-  if ! make -s -C "$ROOT" install-claude-skill HOME="$portable_home"; then
-    record_fail 'repeated Claude skill installation is idempotent'
+  if [ ! -L "$claude_link" ] || [ "$(readlink "$claude_link")" != "$skill_store" ]; then
+    record_fail 'guided install links Claude Code to the canonical skill'
     return
   fi
-  if [ ! -L "$claude_link" ] || [ "$(readlink "$claude_link")" != "${installed_skill%/*}" ]; then
-    record_fail 'Claude skill link points to the canonical installed skill'
+  if ! make -s -C "$ROOT" install HOME="$portable_home" \
+    INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=yes > /dev/null; then
+    record_fail 'repeated guided installation is idempotent'
     return
   fi
 
   printf 'keep\n' > "$portable_home/.local/bin/keep-me"
   printf 'keep\n' > "$portable_home/.agents/skills/keep-me"
   printf 'keep\n' > "$portable_home/.claude/skills/keep-me"
+  printf 'keep\n' > "$portable_home/.local/share/amphetamine-cli/keep-me"
   if ! make -s -C "$ROOT" uninstall HOME="$portable_home"; then
     record_fail 'make uninstall completes'
     return
   fi
-  if [ -e "$installed_binary" ] || [ -e "$installed_skill" ] || [ -L "$claude_link" ]; then
-    record_fail 'make uninstall removes the installed artifacts'
+  if [ -e "$installed_binary" ] ||
+     [ -e "$skill_store/SKILL.md" ] ||
+     [ -e "$skill_store/.installed-by-amphetamine-cli" ] ||
+     [ -e "$codex_link" ] || [ -L "$codex_link" ] ||
+     [ -e "$claude_link" ] || [ -L "$claude_link" ]; then
+    record_fail 'make uninstall removes the CLI, canonical skill, and both discovery links'
     return
   fi
   if [ ! -f "$portable_home/.local/bin/keep-me" ] ||
      [ ! -f "$portable_home/.agents/skills/keep-me" ] ||
-     [ ! -f "$portable_home/.claude/skills/keep-me" ]; then
+     [ ! -f "$portable_home/.claude/skills/keep-me" ] ||
+     [ ! -f "$portable_home/.local/share/amphetamine-cli/keep-me" ]; then
     record_fail 'make uninstall preserves neighboring files'
     return
   fi
-  record_pass 'portable install and uninstall manage binary and skill without source links'
+  record_pass 'guided install asks about both agents and uninstall removes both skills'
+}
+
+test_agent_selection_matrix() {
+  reset_fakes
+  local no_skill_home=$TEST_TMP/no-skill-home
+  local codex_home=$TEST_TMP/codex-only-home
+  local claude_home=$TEST_TMP/claude-only-home
+  local skill_store codex_link claude_link
+
+  if ! make -s -C "$ROOT" install HOME="$no_skill_home" \
+    INSTALL_CODEX_SKILL=no INSTALL_CLAUDE_SKILL=no > /dev/null; then
+    record_fail 'binary-only automated install completes'
+    return
+  fi
+  if [ ! -x "$no_skill_home/.local/bin/amphetamine" ] ||
+     [ -e "$no_skill_home/.local/share/amphetamine-cli/skills/amphetamine/SKILL.md" ] ||
+     [ -e "$no_skill_home/.agents/skills/amphetamine" ] ||
+     [ -e "$no_skill_home/.claude/skills/amphetamine" ]; then
+    record_fail 'no/no selection installs only the CLI'
+    return
+  fi
+
+  if ! make -s -C "$ROOT" install HOME="$codex_home" \
+    INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=no > /dev/null; then
+    record_fail 'Codex-only automated install completes'
+    return
+  fi
+  skill_store=$codex_home/.local/share/amphetamine-cli/skills/amphetamine
+  codex_link=$codex_home/.agents/skills/amphetamine
+  claude_link=$codex_home/.claude/skills/amphetamine
+  if [ ! -f "$skill_store/SKILL.md" ] ||
+     [ ! -L "$codex_link" ] || [ "$(readlink "$codex_link")" != "$skill_store" ] ||
+     [ -e "$claude_link" ] || [ -L "$claude_link" ]; then
+    record_fail 'yes/no selection enables only Codex discovery'
+    return
+  fi
+  if ! make -s -C "$ROOT" install-claude-skill HOME="$codex_home" > /dev/null; then
+    record_fail 'standalone Claude skill installation completes'
+    return
+  fi
+  if [ ! -L "$codex_link" ] || [ ! -L "$claude_link" ]; then
+    record_fail 'adding Claude Code discovery preserves existing Codex discovery'
+    return
+  fi
+
+  if ! make -s -C "$ROOT" install HOME="$claude_home" \
+    INSTALL_CODEX_SKILL=no INSTALL_CLAUDE_SKILL=yes > /dev/null; then
+    record_fail 'Claude-only automated install completes'
+    return
+  fi
+  skill_store=$claude_home/.local/share/amphetamine-cli/skills/amphetamine
+  codex_link=$claude_home/.agents/skills/amphetamine
+  claude_link=$claude_home/.claude/skills/amphetamine
+  if [ ! -f "$skill_store/SKILL.md" ] ||
+     [ -e "$codex_link" ] || [ -L "$codex_link" ] ||
+     [ ! -L "$claude_link" ] || [ "$(readlink "$claude_link")" != "$skill_store" ]; then
+    record_fail 'no/yes selection enables only Claude Code discovery'
+    return
+  fi
+
+  record_pass 'automation choices independently control and safely extend agent discovery'
+}
+
+test_install_requires_explicit_choices() {
+  reset_fakes
+  local prompt_home=$TEST_TMP/prompt-eof-home
+  local invalid_home=$TEST_TMP/invalid-choice-home
+
+  if make -s -C "$ROOT" install HOME="$prompt_home" < /dev/null \
+    > /dev/null 2>"$TEST_TMP/prompt-eof.err"; then
+    record_fail 'installer rejects missing non-interactive choices'
+    return
+  fi
+  if [ -e "$prompt_home/.local/bin/amphetamine" ] ||
+     ! assert_contains "$(<"$TEST_TMP/prompt-eof.err")" 'INSTALL_CODEX_SKILL=yes or no' \
+       'installer explains the non-interactive Codex choice'; then
+    return
+  fi
+
+  if make -s -C "$ROOT" install HOME="$invalid_home" \
+    INSTALL_CODEX_SKILL=maybe INSTALL_CLAUDE_SKILL=no \
+    > /dev/null 2>"$TEST_TMP/invalid-choice.err"; then
+    record_fail 'installer rejects an invalid automated choice'
+    return
+  fi
+  if [ -e "$invalid_home/.local/bin/amphetamine" ]; then
+    record_fail 'invalid automated choice makes no installation changes'
+    return
+  fi
+  record_pass 'non-interactive installs require explicit valid agent choices'
 }
 
 test_custom_prefix_install() {
@@ -397,12 +503,14 @@ test_custom_prefix_install() {
   local custom_home=$TEST_TMP/custom-home
   local custom_prefix=$TEST_TMP/custom-prefix
 
-  if ! make -s -C "$ROOT" install HOME="$custom_home" PREFIX="$custom_prefix"; then
+  if ! make -s -C "$ROOT" install HOME="$custom_home" PREFIX="$custom_prefix" \
+    INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=no > /dev/null; then
     record_fail 'custom-prefix install completes'
     return
   fi
   if [ ! -x "$custom_prefix/bin/amphetamine" ] ||
-     [ ! -f "$custom_home/.agents/skills/amphetamine/SKILL.md" ]; then
+     [ ! -L "$custom_home/.agents/skills/amphetamine" ] ||
+     [ ! -f "$custom_home/.local/share/amphetamine-cli/skills/amphetamine/SKILL.md" ]; then
     record_fail 'custom-prefix install separates binary and user skill destinations'
     return
   fi
@@ -411,46 +519,61 @@ test_custom_prefix_install() {
     return
   fi
   if [ -e "$custom_prefix/bin/amphetamine" ] ||
-     [ -e "$custom_home/.agents/skills/amphetamine/SKILL.md" ]; then
+     [ -e "$custom_home/.local/share/amphetamine-cli/skills/amphetamine/SKILL.md" ] ||
+     [ -L "$custom_home/.agents/skills/amphetamine" ]; then
     record_fail 'custom-prefix uninstall removes both installed artifacts'
     return
   fi
   record_pass 'custom PREFIX changes the binary destination without losing skill discovery'
 }
 
-test_claude_skill_conflict() {
+test_selected_skill_conflict() {
   reset_fakes
   local conflict_home=$TEST_TMP/conflict-home
   local conflict_path=$conflict_home/.claude/skills/amphetamine
+  local skill_store=$conflict_home/.local/share/amphetamine-cli/skills/amphetamine
 
   mkdir -p "$conflict_path"
   printf 'owned elsewhere\n' > "$conflict_path/keep-me"
-  if make -s -C "$ROOT" install-claude-skill HOME="$conflict_home" > /dev/null 2>"$TEST_TMP/claude-conflict.err"; then
+  if make -s -C "$ROOT" install HOME="$conflict_home" \
+    INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=yes \
+    > /dev/null 2>"$TEST_TMP/claude-conflict.err"; then
     record_fail 'Claude skill installation rejects an existing destination'
     return
   fi
-  if [ ! -f "$conflict_home/.agents/skills/amphetamine/SKILL.md" ]; then
-    record_fail 'Claude conflict check still installs the canonical user skill'
+  if [ ! -f "$conflict_path/keep-me" ] ||
+     [ -e "$skill_store/SKILL.md" ] ||
+     [ -e "$conflict_home/.agents/skills/amphetamine" ] ||
+     [ -e "$conflict_home/.local/bin/amphetamine" ]; then
+    record_fail 'selected skill conflict preserves existing state without partial installation'
     return
   fi
-  if [ ! -f "$conflict_path/keep-me" ]; then
-    record_fail 'Claude skill conflict preserves the existing destination'
+  if ! make -s -C "$ROOT" install HOME="$conflict_home" \
+    INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=no > /dev/null; then
+    record_fail 'an unselected unrelated skill does not block installation'
     return
   fi
-  record_pass 'Claude compatibility install refuses to overwrite an existing skill'
+  if [ ! -L "$conflict_home/.agents/skills/amphetamine" ] ||
+     [ ! -f "$conflict_path/keep-me" ]; then
+    record_fail 'unselected unrelated skill is preserved'
+    return
+  fi
+  record_pass 'selected conflicts fail closed while unselected unrelated skills are preserved'
 }
 
-test_canonical_skill_conflict() {
+test_canonical_store_conflict() {
   reset_fakes
   local conflict_home=$TEST_TMP/canonical-conflict-home
-  local conflict_skill=$conflict_home/.agents/skills/amphetamine/SKILL.md
-  local conflict_link=$conflict_home/.claude/skills/amphetamine
+  local conflict_skill=$conflict_home/.local/share/amphetamine-cli/skills/amphetamine/SKILL.md
+  local symlink_home=$TEST_TMP/symlink-store-home
+  local external_store=$TEST_TMP/external-skill-store
+  local symlink_store=$symlink_home/.local/share/amphetamine-cli/skills/amphetamine
 
   mkdir -p "${conflict_skill%/*}"
-  mkdir -p "${conflict_link%/*}"
   printf 'owned elsewhere\n' > "$conflict_skill"
-  ln -s "${conflict_skill%/*}" "$conflict_link"
-  if make -s -C "$ROOT" install HOME="$conflict_home" > /dev/null 2>"$TEST_TMP/canonical-conflict.err"; then
+  if make -s -C "$ROOT" install HOME="$conflict_home" \
+    INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=no \
+    > /dev/null 2>"$TEST_TMP/canonical-conflict.err"; then
     record_fail 'canonical skill installation rejects an unowned destination'
     return
   fi
@@ -463,11 +586,59 @@ test_canonical_skill_conflict() {
     record_fail 'canonical skill uninstall rejects an unowned destination'
     return
   fi
-  if [ ! -L "$conflict_link" ] || [ ! -f "$conflict_skill" ]; then
-    record_fail 'canonical skill uninstall preserves an unowned skill and discovery link'
+  if [ ! -f "$conflict_skill" ]; then
+    record_fail 'canonical skill uninstall preserves an unowned skill'
+    return
+  fi
+
+  mkdir -p "$external_store" "${symlink_store%/*}"
+  cp "$ROOT/skill/SKILL.md" "$external_store/SKILL.md"
+  : > "$external_store/.installed-by-amphetamine-cli"
+  ln -s "$external_store" "$symlink_store"
+  if make -s -C "$ROOT" uninstall HOME="$symlink_home" \
+    > /dev/null 2>"$TEST_TMP/symlink-store-uninstall.err"; then
+    record_fail 'uninstall rejects a symlinked canonical store'
+    return
+  fi
+  if [ ! -f "$external_store/SKILL.md" ] || [ ! -L "$symlink_store" ]; then
+    record_fail 'symlinked canonical store rejection preserves external files'
     return
   fi
   record_pass 'canonical skill install and uninstall refuse unowned state without partial changes'
+}
+
+test_legacy_skill_migration() {
+  reset_fakes
+  local legacy_home=$TEST_TMP/legacy-home
+  local legacy_codex=$legacy_home/.agents/skills/amphetamine
+  local legacy_claude=$legacy_home/.claude/skills/amphetamine
+  local skill_store=$legacy_home/.local/share/amphetamine-cli/skills/amphetamine
+
+  mkdir -p "$legacy_codex" "${legacy_claude%/*}"
+  cp "$ROOT/skill/SKILL.md" "$legacy_codex/SKILL.md"
+  : > "$legacy_codex/.installed-by-amphetamine-cli"
+  ln -s "$legacy_codex" "$legacy_claude"
+
+  if ! make -s -C "$ROOT" install HOME="$legacy_home" \
+    INSTALL_CODEX_SKILL=yes INSTALL_CLAUDE_SKILL=yes > /dev/null; then
+    record_fail 'legacy skill layout migrates during guided install'
+    return
+  fi
+  if [ ! -f "$skill_store/SKILL.md" ] ||
+     [ ! -L "$legacy_codex" ] || [ "$(readlink "$legacy_codex")" != "$skill_store" ] ||
+     [ ! -L "$legacy_claude" ] || [ "$(readlink "$legacy_claude")" != "$skill_store" ]; then
+    record_fail 'legacy skill migration produces the neutral canonical layout'
+    return
+  fi
+  if ! make -s -C "$ROOT" uninstall HOME="$legacy_home" > /dev/null; then
+    record_fail 'migrated layout uninstalls cleanly'
+    return
+  fi
+  if [ -e "$skill_store/SKILL.md" ] || [ -L "$legacy_codex" ] || [ -L "$legacy_claude" ]; then
+    record_fail 'uninstall removes both migrated discovery links and canonical skill'
+    return
+  fi
+  record_pass 'existing v1 skill installs migrate and uninstall cleanly'
 }
 
 test_version_without_app
@@ -485,10 +656,13 @@ test_missing_app_failure
 test_defaults_failure
 test_malformed_status_failure
 test_mutating_json_contract
-test_portable_install_and_uninstall
+test_guided_install_and_uninstall
+test_agent_selection_matrix
+test_install_requires_explicit_choices
 test_custom_prefix_install
-test_claude_skill_conflict
-test_canonical_skill_conflict
+test_selected_skill_conflict
+test_canonical_store_conflict
+test_legacy_skill_migration
 
 if [ "$failed" -ne 0 ]; then
   printf '%d test(s) failed; %d passed\n' "$failed" "$passed" >&2

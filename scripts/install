@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+: "${SOURCE_BINARY:?SOURCE_BINARY is required}"
+: "${SOURCE_SKILL:?SOURCE_SKILL is required}"
+: "${INSTALLED_BINARY:?INSTALLED_BINARY is required}"
+: "${SKILL_STORE:?SKILL_STORE is required}"
+: "${CODEX_SKILL_LINK:?CODEX_SKILL_LINK is required}"
+: "${CLAUDE_SKILL_LINK:?CLAUDE_SKILL_LINK is required}"
+
+MARKER_NAME=.installed-by-amphetamine-cli
+STORE_MARKER=$SKILL_STORE/$MARKER_NAME
+LEGACY_MARKER=$CODEX_SKILL_LINK/$MARKER_NAME
+CHOICE=
+LINK_TARGET=
+
+fail() {
+  printf 'amphetamine-cli install: %s\n' "$1" >&2
+  exit 1
+}
+
+choose() {
+  local supplied=$1 prompt=$2 variable_name=$3 answer
+
+  if [ -n "$supplied" ]; then
+    answer=$supplied
+  else
+    while :; do
+      printf '%s [y/n] ' "$prompt"
+      if ! IFS= read -r answer; then
+        fail "unable to read a response; set $variable_name=yes or no for a non-interactive install"
+      fi
+      case $answer in
+        [Yy]|[Yy][Ee][Ss]|[Nn]|[Nn][Oo]) break ;;
+        *) printf 'Please answer yes or no.\n' >&2 ;;
+      esac
+    done
+  fi
+
+  case $answer in
+    [Yy]|[Yy][Ee][Ss]) CHOICE=yes ;;
+    [Nn]|[Nn][Oo]) CHOICE=no ;;
+    *) fail "$variable_name must be yes or no" ;;
+  esac
+}
+
+read_link() {
+  local link=$1
+  LINK_TARGET=$(readlink "$link") || fail "could not inspect existing symlink: $link"
+}
+
+legacy_is_owned() {
+  [ ! -L "$CODEX_SKILL_LINK" ] &&
+    [ -d "$CODEX_SKILL_LINK" ] &&
+    [ -f "$CODEX_SKILL_LINK/SKILL.md" ] &&
+    [ ! -L "$LEGACY_MARKER" ] &&
+    [ -f "$LEGACY_MARKER" ]
+}
+
+legacy_is_clean() {
+  local extra
+  extra=$(find "$CODEX_SKILL_LINK" -mindepth 1 -maxdepth 1 \
+    ! -name SKILL.md ! -name "$MARKER_NAME" -print -quit) ||
+    fail "could not inspect legacy skill directory: $CODEX_SKILL_LINK"
+  [ -z "$extra" ]
+}
+
+preflight_selected_link() {
+  local agent=$1 link=$2 allow_legacy=$3
+
+  if [ -L "$link" ]; then
+    read_link "$link"
+    if [ "$LINK_TARGET" = "$SKILL_STORE" ]; then
+      return
+    fi
+    if [ "$allow_legacy" = yes ] && [ "$LINK_TARGET" = "$CODEX_SKILL_LINK" ] && legacy_is_owned; then
+      return
+    fi
+    fail "refusing to replace existing $agent skill link: $link -> $LINK_TARGET"
+  fi
+
+  if [ -e "$link" ]; then
+    if [ "$allow_legacy" = self ] && legacy_is_owned && legacy_is_clean; then
+      return
+    fi
+    fail "refusing to replace existing $agent skill: $link"
+  fi
+}
+
+install_link() {
+  local link=$1 parent
+  parent=${link%/*}
+
+  if [ -L "$link" ]; then
+    read_link "$link"
+    if [ "$LINK_TARGET" = "$SKILL_STORE" ]; then
+      return
+    fi
+    rm -f "$link"
+  fi
+
+  install -d "$parent"
+  ln -s "$SKILL_STORE" "$link"
+}
+
+remove_legacy_link() {
+  local link=$1
+  if [ -L "$link" ]; then
+    read_link "$link"
+    if [ "$LINK_TARGET" = "$CODEX_SKILL_LINK" ]; then
+      rm -f "$link"
+    fi
+  fi
+}
+
+choose "${INSTALL_CODEX_SKILL:-}" 'Enable the Amphetamine skill for Codex?' INSTALL_CODEX_SKILL
+CODEX_CHOICE=$CHOICE
+choose "${INSTALL_CLAUDE_SKILL:-}" 'Enable the Amphetamine skill for Claude Code?' INSTALL_CLAUDE_SKILL
+CLAUDE_CHOICE=$CHOICE
+
+LEGACY_OWNED=no
+if legacy_is_owned; then
+  LEGACY_OWNED=yes
+fi
+LEGACY_CLAUDE_LINK=no
+if [ -L "$CLAUDE_SKILL_LINK" ]; then
+  read_link "$CLAUDE_SKILL_LINK"
+  if [ "$LEGACY_OWNED" = yes ] && [ "$LINK_TARGET" = "$CODEX_SKILL_LINK" ]; then
+    LEGACY_CLAUDE_LINK=yes
+  fi
+fi
+
+if [ "$CODEX_CHOICE" = yes ]; then
+  preflight_selected_link Codex "$CODEX_SKILL_LINK" self
+fi
+if [ "$CLAUDE_CHOICE" = yes ]; then
+  preflight_selected_link 'Claude Code' "$CLAUDE_SKILL_LINK" yes
+fi
+
+if [ "$CODEX_CHOICE" = yes ] || [ "$CLAUDE_CHOICE" = yes ]; then
+  if [ -L "$SKILL_STORE" ]; then
+    fail "refusing to replace symlinked canonical skill directory: $SKILL_STORE"
+  fi
+  if [ -L "$STORE_MARKER" ]; then
+    fail "refusing to trust symlinked canonical skill marker: $STORE_MARKER"
+  fi
+  if [ -e "$SKILL_STORE/SKILL.md" ] && [ ! -f "$STORE_MARKER" ]; then
+    fail "refusing to overwrite canonical skill not installed by amphetamine-cli: $SKILL_STORE"
+  fi
+  if [ -L "$SKILL_STORE/SKILL.md" ]; then
+    fail "refusing to overwrite symlinked canonical skill file: $SKILL_STORE/SKILL.md"
+  fi
+fi
+
+if { [ "$CODEX_CHOICE" = yes ] || [ "$CLAUDE_CHOICE" = yes ]; } &&
+   [ "$LEGACY_OWNED" = yes ] && ! legacy_is_clean; then
+  fail "cannot migrate legacy Codex skill directory because it contains other files: $CODEX_SKILL_LINK"
+fi
+
+if [ "$CODEX_CHOICE" = yes ] || [ "$CLAUDE_CHOICE" = yes ]; then
+  install -d "$SKILL_STORE"
+  install -m 0644 "$SOURCE_SKILL" "$SKILL_STORE/SKILL.md"
+  : > "$STORE_MARKER"
+fi
+
+if [ "$LEGACY_OWNED" = yes ] &&
+   { [ "$CODEX_CHOICE" = yes ] || [ "$CLAUDE_CHOICE" = yes ]; }; then
+  remove_legacy_link "$CLAUDE_SKILL_LINK"
+  rm -f "$CODEX_SKILL_LINK/SKILL.md" "$LEGACY_MARKER"
+  rmdir "$CODEX_SKILL_LINK" 2>/dev/null || true
+fi
+
+if [ "$CODEX_CHOICE" = yes ]; then
+  install_link "$CODEX_SKILL_LINK"
+elif [ "$LEGACY_OWNED" = yes ] && [ "$CLAUDE_CHOICE" = yes ]; then
+  install_link "$CODEX_SKILL_LINK"
+fi
+
+if [ "$CLAUDE_CHOICE" = yes ]; then
+  install_link "$CLAUDE_SKILL_LINK"
+elif [ "$LEGACY_CLAUDE_LINK" = yes ] && [ "$CODEX_CHOICE" = yes ]; then
+  install_link "$CLAUDE_SKILL_LINK"
+fi
+
+install -d "${INSTALLED_BINARY%/*}"
+install -m 0755 "$SOURCE_BINARY" "$INSTALLED_BINARY"
+
+printf 'Installed CLI: %s\n' "$INSTALLED_BINARY"
+printf 'Codex skill selected: %s\n' "$CODEX_CHOICE"
+printf 'Claude Code skill selected: %s\n' "$CLAUDE_CHOICE"

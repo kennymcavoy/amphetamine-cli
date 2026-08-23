@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+: "${INSTALLED_BINARY:?INSTALLED_BINARY is required}"
+: "${SKILL_STORE:?SKILL_STORE is required}"
+: "${SKILL_DATA_ROOT:?SKILL_DATA_ROOT is required}"
+: "${CODEX_SKILL_LINK:?CODEX_SKILL_LINK is required}"
+: "${CLAUDE_SKILL_LINK:?CLAUDE_SKILL_LINK is required}"
+
+MARKER_NAME=.installed-by-amphetamine-cli
+STORE_MARKER=$SKILL_STORE/$MARKER_NAME
+LEGACY_MARKER=$CODEX_SKILL_LINK/$MARKER_NAME
+
+fail() {
+  printf 'amphetamine-cli uninstall: %s\n' "$1" >&2
+  exit 1
+}
+
+remove_link_to() {
+  local link=$1 target=$2 current
+  if [ -L "$link" ]; then
+    current=$(readlink "$link") || fail "could not inspect existing symlink: $link"
+    if [ "$current" = "$target" ]; then
+      rm -f "$link"
+    fi
+  fi
+}
+
+if [ -L "$SKILL_STORE" ]; then
+  fail "refusing to remove through symlinked canonical skill directory: $SKILL_STORE"
+fi
+if [ -L "$STORE_MARKER" ]; then
+  fail "refusing to trust symlinked canonical skill marker: $STORE_MARKER"
+fi
+if [ -e "$SKILL_STORE/SKILL.md" ] && [ ! -f "$STORE_MARKER" ]; then
+  fail "refusing to remove canonical skill not installed by amphetamine-cli: $SKILL_STORE"
+fi
+
+if [ -f "$STORE_MARKER" ]; then
+  remove_link_to "$CODEX_SKILL_LINK" "$SKILL_STORE"
+  remove_link_to "$CLAUDE_SKILL_LINK" "$SKILL_STORE"
+  rm -f "$SKILL_STORE/SKILL.md" "$STORE_MARKER"
+  rmdir "$SKILL_STORE" 2>/dev/null || true
+  rmdir "${SKILL_STORE%/*}" 2>/dev/null || true
+  rmdir "$SKILL_DATA_ROOT" 2>/dev/null || true
+fi
+
+if [ ! -L "$CODEX_SKILL_LINK" ] && [ ! -L "$LEGACY_MARKER" ] && [ -f "$LEGACY_MARKER" ]; then
+  remove_link_to "$CLAUDE_SKILL_LINK" "$CODEX_SKILL_LINK"
+  rm -f "$CODEX_SKILL_LINK/SKILL.md" "$LEGACY_MARKER"
+  rmdir "$CODEX_SKILL_LINK" 2>/dev/null || true
+fi
+
+rm -f "$INSTALLED_BINARY"
+printf 'Removed amphetamine-cli installed artifacts.\n'
