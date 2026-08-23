@@ -23,7 +23,37 @@ case "$script" in
   *'set activeState to session is active'*)
     printf '%b\n' "${FAKE_STATUS:-true\t9000\ttrue\ttrue\tfalse}"
     ;;
+  *'if session is active then'*'allow display sleep'*)
+    if [ "${FAKE_DISPLAY_ACTIVE:-true}" = true ]; then
+      printf 'allow display sleep\n' >> "$AMPHETAMINE_TEST_EFFECT_LOG"
+      printf 'changed\n'
+    else
+      printf 'inactive\n'
+    fi
+    ;;
+  *'if session is active then'*'prevent display sleep'*)
+    if [ "${FAKE_DISPLAY_ACTIVE:-true}" = true ]; then
+      printf 'prevent display sleep\n' >> "$AMPHETAMINE_TEST_EFFECT_LOG"
+      printf 'changed\n'
+    else
+      printf 'inactive\n'
+    fi
+    ;;
   *'to session is active')
     printf '%s\n' "${FAKE_ACTIVE:-true}"
+    ;;
+  *'to allow display sleep')
+    if [ "${FAKE_EXPIRE_BEFORE_DISPLAY_ACTION:-false}" = true ]; then
+      printf 'global preference write\n' >> "$AMPHETAMINE_TEST_EFFECT_LOG"
+    else
+      printf 'allow display sleep\n' >> "$AMPHETAMINE_TEST_EFFECT_LOG"
+    fi
+    ;;
+  *'to prevent display sleep')
+    if [ "${FAKE_EXPIRE_BEFORE_DISPLAY_ACTION:-false}" = true ]; then
+      printf 'global preference write\n' >> "$AMPHETAMINE_TEST_EFFECT_LOG"
+    else
+      printf 'prevent display sleep\n' >> "$AMPHETAMINE_TEST_EFFECT_LOG"
+    fi
     ;;
 esac

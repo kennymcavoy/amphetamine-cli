@@ -19,6 +19,7 @@ Use the installed `amphetamine` binary exclusively. Its status output exposes th
 | 6 | Allow display sleep this session | `amphetamine start 2h --display-sleep` or `amphetamine display sleep` |
 | 7 | Prevent display sleep this session | `amphetamine start 2h --no-display-sleep` or `amphetamine display no-sleep` |
 | 8 | Stop | `amphetamine stop` |
+| 9 | Report the installed version | `amphetamine version` |
 
 Add `--json` to `start`, `stop`, or `display` when the result will be consumed programmatically. It replaces human stdout with the status schema returned by `amphetamine status --json`.
 

@@ -4,6 +4,11 @@ set -u
 
 printf 'defaults %s\n' "$*" >> "$AMPHETAMINE_TEST_LOG"
 
+if [ "${FAKE_DEFAULTS_FAIL:-false}" = true ]; then
+  printf 'fake defaults failure\n' >&2
+  exit 1
+fi
+
 if [ "$#" -ne 3 ] || [ "$1" != read ] ||
    [ "$2" != com.if.Amphetamine ] || [ "$3" != 'Allow Display Sleep' ]; then
   printf 'fake defaults: unexpected arguments\n' >&2

@@ -57,7 +57,8 @@ Uninstall removes only the `amphetamine` executable. It leaves the containing `b
 | 11 | `amphetamine display sleep` | Allow display sleep for the current session |
 | 12 | `amphetamine display no-sleep` | Prevent display sleep for the current session |
 | 13 | `amphetamine stop` | End the current session |
-| 14 | `amphetamine help` | Show CLI help |
+| 14 | `amphetamine version` | Show the installed CLI version |
+| 15 | `amphetamine help` | Show CLI help |
 
 Durations are case-insensitive. The accepted forms are `Nh`, `Nm`, and `NhMm`; use `--indefinite` for a session with no time limit.
 
@@ -108,4 +109,4 @@ make test
 make lint
 ```
 
-The test suite uses fake `osascript` and `defaults` commands, so it does not need Amphetamine or macOS.
+The test suite uses fake `osascript` and `defaults` commands, so it does not need Amphetamine. CI runs it on Ubuntu and again with the macOS system Bash 3.2; ShellCheck runs on Ubuntu.

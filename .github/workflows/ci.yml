@@ -26,3 +26,21 @@ jobs:
 
       - name: Run ShellCheck
         run: make lint
+
+  bash-3-2:
+    name: macOS Bash 3.2 compatibility
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Require the macOS system Bash 3.2
+        run: |
+          bash_version=$(/bin/bash -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"')
+          printf 'system Bash: %s\n' "$bash_version"
+          test "$bash_version" = 3.2
+
+      - name: Run tests with Bash 3.2
+        run: /bin/bash tests/test.sh

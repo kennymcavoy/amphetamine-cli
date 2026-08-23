@@ -7,11 +7,12 @@ CLI=$ROOT/bin/amphetamine
 FIXTURE_BIN=$ROOT/tests/fixtures/bin
 TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/amphetamine-tests.XXXXXX")
 AMPHETAMINE_TEST_LOG=$TEST_TMP/osascript.log
+AMPHETAMINE_TEST_EFFECT_LOG=$TEST_TMP/effects.log
 AMPHETAMINE_APP_PATH=$TEST_TMP/Amphetamine.app
 STDERR_FILE=$TEST_TMP/stderr
 PATH=$FIXTURE_BIN:/usr/bin:/bin
 
-export AMPHETAMINE_TEST_LOG AMPHETAMINE_APP_PATH PATH
+export AMPHETAMINE_TEST_LOG AMPHETAMINE_TEST_EFFECT_LOG AMPHETAMINE_APP_PATH PATH
 
 passed=0
 failed=0
@@ -71,12 +72,19 @@ assert_not_contains() {
 
 reset_fakes() {
   : > "$AMPHETAMINE_TEST_LOG"
+  : > "$AMPHETAMINE_TEST_EFFECT_LOG"
   : > "$STDERR_FILE"
+  AMPHETAMINE_APP_PATH=$TEST_TMP/Amphetamine.app
   FAKE_ACTIVE=true
   FAKE_STATUS='true\t9000\ttrue\ttrue\tfalse'
   FAKE_DISPLAY_PREF=1
+  FAKE_DEFAULTS_FAIL=false
   FAKE_OSASCRIPT_FAIL_MATCH=
-  export FAKE_ACTIVE FAKE_STATUS FAKE_DISPLAY_PREF FAKE_OSASCRIPT_FAIL_MATCH
+  FAKE_DISPLAY_ACTIVE=true
+  FAKE_EXPIRE_BEFORE_DISPLAY_ACTION=false
+  export AMPHETAMINE_APP_PATH FAKE_ACTIVE FAKE_STATUS FAKE_DISPLAY_PREF FAKE_DEFAULTS_FAIL
+  export FAKE_OSASCRIPT_FAIL_MATCH
+  export FAKE_DISPLAY_ACTIVE FAKE_EXPIRE_BEFORE_DISPLAY_ACTION
 }
 
 run_cli() {
@@ -86,6 +94,22 @@ run_cli() {
 
 log_contents() {
   LOG_CONTENTS=$(<"$AMPHETAMINE_TEST_LOG")
+}
+
+effect_contents() {
+  EFFECT_CONTENTS=$(<"$AMPHETAMINE_TEST_EFFECT_LOG")
+}
+
+test_version_without_app() {
+  reset_fakes
+  AMPHETAMINE_APP_PATH=$TEST_TMP/Missing.app
+  export AMPHETAMINE_APP_PATH
+  run_cli version
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'version exits successfully without Amphetamine installed' || return
+  assert_eq 'amphetamine 1.0.0' "$RUN_OUTPUT" 'version prints the release identifier' || return
+  assert_eq '' "$LOG_CONTENTS" 'version does not invoke system tools' || return
+  record_pass 'version reports release 1.0.0 without requiring Amphetamine'
 }
 
 test_start_duration() {
@@ -138,28 +162,42 @@ test_stop() {
 test_display_active() {
   reset_fakes
   run_cli display sleep
-  log_contents
+  effect_contents
   assert_eq 0 "$RUN_STATUS" 'display sleep exits successfully' || return
-  assert_contains "$LOG_CONTENTS" 'to allow display sleep' 'display sleep invokes allow' || return
+  assert_eq 'allow display sleep' "$EFFECT_CONTENTS" 'display sleep changes the active session' || return
 
   reset_fakes
   run_cli display no-sleep
-  log_contents
+  effect_contents
   assert_eq 0 "$RUN_STATUS" 'display no-sleep exits successfully' || return
-  assert_contains "$LOG_CONTENTS" 'to prevent display sleep' 'display no-sleep invokes prevent' || return
+  assert_eq 'prevent display sleep' "$EFFECT_CONTENTS" 'display no-sleep changes the active session' || return
   record_pass 'display modes mutate only an active session'
 }
 
 test_display_inactive() {
   reset_fakes
   FAKE_ACTIVE=false
-  export FAKE_ACTIVE
+  FAKE_DISPLAY_ACTIVE=false
+  export FAKE_ACTIVE FAKE_DISPLAY_ACTIVE
   run_cli display sleep
-  log_contents
+  effect_contents
   assert_eq 2 "$RUN_STATUS" 'inactive display exits 2' || return
-  assert_not_contains "$LOG_CONTENTS" 'to allow display sleep' 'inactive display does not invoke allow' || return
-  assert_not_contains "$LOG_CONTENTS" 'to prevent display sleep' 'inactive display does not invoke prevent' || return
+  assert_eq '' "$EFFECT_CONTENTS" 'inactive display does not change preferences' || return
   record_pass 'display refuses an inactive session without changing Preferences'
+}
+
+test_display_session_expiry() {
+  reset_fakes
+  FAKE_ACTIVE=true
+  FAKE_DISPLAY_ACTIVE=false
+  FAKE_EXPIRE_BEFORE_DISPLAY_ACTION=true
+  FAKE_STATUS='false\t-3\ttrue\ttrue\tfalse'
+  export FAKE_ACTIVE FAKE_DISPLAY_ACTIVE FAKE_EXPIRE_BEFORE_DISPLAY_ACTION FAKE_STATUS
+  run_cli display no-sleep
+  effect_contents
+  assert_eq 2 "$RUN_STATUS" 'expired display session exits 2' || return
+  assert_eq '' "$EFFECT_CONTENTS" 'expired display session does not change global preferences' || return
+  record_pass 'display handles session expiry without changing Preferences'
 }
 
 test_duration_parser() {
@@ -169,6 +207,12 @@ test_duration_parser() {
   assert_eq 0 "$RUN_STATUS" 'combined duration exits successfully' || return
   assert_contains "$LOG_CONTENTS" 'duration:150' 'combined duration becomes 150' || return
   assert_contains "$LOG_CONTENTS" 'interval:minutes' 'combined duration uses minutes' || return
+
+  reset_fakes
+  run_cli start 2H30M
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'uppercase combined duration exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'duration:150' 'uppercase combined duration becomes 150' || return
 
   reset_fakes
   run_cli start 90
@@ -181,7 +225,13 @@ test_duration_parser() {
   assert_eq 2 "$RUN_STATUS" 'zero hours exits 2' || return
   log_contents
   assert_eq '' "$LOG_CONTENTS" 'zero hours does not invoke tools' || return
-  record_pass 'duration parser accepts combined values and rejects invalid forms'
+
+  reset_fakes
+  run_cli start 2h --indefinite
+  assert_eq 2 "$RUN_STATUS" 'conflicting durations exit 2' || return
+  log_contents
+  assert_eq '' "$LOG_CONTENTS" 'conflicting durations do not invoke tools' || return
+  record_pass 'duration parser accepts case-insensitive forms and rejects invalid combinations'
 }
 
 test_json() {
@@ -218,6 +268,74 @@ test_failure_has_no_success_status() {
   record_pass 'AppleScript failures do not print a success-like status block'
 }
 
+test_missing_app_failure() {
+  reset_fakes
+  AMPHETAMINE_APP_PATH=$TEST_TMP/Missing.app
+  export AMPHETAMINE_APP_PATH
+  run_cli status
+  log_contents
+  assert_eq 1 "$RUN_STATUS" 'missing app exits 1' || return
+  assert_eq '' "$RUN_OUTPUT" 'missing app has no stdout status' || return
+  assert_eq '' "$LOG_CONTENTS" 'missing app does not invoke system tools' || return
+  record_pass 'missing app fails without success-like output'
+}
+
+test_defaults_failure() {
+  reset_fakes
+  FAKE_DEFAULTS_FAIL=true
+  export FAKE_DEFAULTS_FAIL
+  run_cli start 2h
+  log_contents
+  assert_eq 1 "$RUN_STATUS" 'defaults failure exits 1' || return
+  assert_eq '' "$RUN_OUTPUT" 'defaults failure has no stdout status' || return
+  assert_not_contains "$LOG_CONTENTS" 'start new session' 'defaults failure does not start a session' || return
+  record_pass 'preference-read failure prevents session creation'
+}
+
+test_malformed_status_failure() {
+  reset_fakes
+  FAKE_STATUS='malformed status'
+  export FAKE_STATUS
+  run_cli status
+  assert_eq 1 "$RUN_STATUS" 'malformed status exits 1' || return
+  assert_eq '' "$RUN_OUTPUT" 'malformed status has no stdout status' || return
+  record_pass 'malformed AppleScript status fails closed'
+}
+
+json_matches_status() {
+  local value=$1 expected_active=$2 expected_remaining=$3
+  printf '%s' "$value" | python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+assert list(value) == ["active", "remaining_seconds", "display_sleep_allowed", "lid_close_keep_awake", "trigger"]
+assert value["active"] is (sys.argv[1] == "true")
+assert value["remaining_seconds"] == int(sys.argv[2])
+assert isinstance(value["display_sleep_allowed"], bool)
+assert isinstance(value["lid_close_keep_awake"], bool)
+assert isinstance(value["trigger"], bool)
+' "$expected_active" "$expected_remaining"
+}
+
+test_mutating_json_contract() {
+  reset_fakes
+  run_cli start 2h --json
+  assert_eq 0 "$RUN_STATUS" 'JSON start exits successfully' || return
+  json_matches_status "$RUN_OUTPUT" true 9000 || { record_fail 'start returns the JSON status contract'; return; }
+
+  reset_fakes
+  FAKE_STATUS='false\t-3\ttrue\ttrue\tfalse'
+  export FAKE_STATUS
+  run_cli stop --json
+  assert_eq 0 "$RUN_STATUS" 'JSON stop exits successfully' || return
+  json_matches_status "$RUN_OUTPUT" false -3 || { record_fail 'stop returns the JSON status contract'; return; }
+
+  reset_fakes
+  run_cli display sleep --json
+  assert_eq 0 "$RUN_STATUS" 'JSON display exits successfully' || return
+  json_matches_status "$RUN_OUTPUT" true 9000 || { record_fail 'display returns the JSON status contract'; return; }
+  record_pass 'all mutating commands return the JSON status contract'
+}
+
 test_install_and_uninstall() {
   reset_fakes
   if ! make -s -C "$ROOT" install PREFIX="$TEST_TMP/install"; then
@@ -248,15 +366,21 @@ test_install_and_uninstall() {
   record_pass 'install copies the binary and uninstall removes only that binary'
 }
 
+test_version_without_app
 test_start_duration
 test_bare_start
 test_indefinite
 test_stop
 test_display_active
 test_display_inactive
+test_display_session_expiry
 test_duration_parser
 test_json
 test_failure_has_no_success_status
+test_missing_app_failure
+test_defaults_failure
+test_malformed_status_failure
+test_mutating_json_contract
 test_install_and_uninstall
 
 if [ "$failed" -ne 0 ]; then
