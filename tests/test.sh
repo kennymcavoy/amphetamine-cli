@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CLI=$ROOT/bin/amphetamine
+FIXTURE_BIN=$ROOT/tests/fixtures/bin
+TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/amphetamine-tests.XXXXXX")
+AMPHETAMINE_TEST_LOG=$TEST_TMP/osascript.log
+AMPHETAMINE_APP_PATH=$TEST_TMP/Amphetamine.app
+STDERR_FILE=$TEST_TMP/stderr
+PATH=$FIXTURE_BIN:/usr/bin:/bin
+
+export AMPHETAMINE_TEST_LOG AMPHETAMINE_APP_PATH PATH
+
+passed=0
+failed=0
+RUN_OUTPUT=
+RUN_STATUS=0
+
+cleanup() {
+  rm -rf "$TEST_TMP"
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$AMPHETAMINE_APP_PATH"
+
+record_pass() {
+  passed=$((passed + 1))
+  printf 'ok %d - %s\n' "$passed" "$1"
+}
+
+record_fail() {
+  failed=$((failed + 1))
+  printf 'not ok - %s\n' "$1" >&2
+}
+
+assert_eq() {
+  local expected=$1 actual=$2 message=$3
+  if [ "$actual" = "$expected" ]; then
+    return 0
+  fi
+  printf '  expected: %s\n  actual:   %s\n' "$expected" "$actual" >&2
+  record_fail "$message"
+  return 1
+}
+
+assert_contains() {
+  local haystack=$1 needle=$2 message=$3
+  case "$haystack" in
+    *"$needle"*) return 0 ;;
+    *)
+      printf '  missing: %s\n' "$needle" >&2
+      record_fail "$message"
+      return 1
+      ;;
+  esac
+}
+
+assert_not_contains() {
+  local haystack=$1 needle=$2 message=$3
+  case "$haystack" in
+    *"$needle"*)
+      printf '  unexpected: %s\n' "$needle" >&2
+      record_fail "$message"
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+reset_fakes() {
+  : > "$AMPHETAMINE_TEST_LOG"
+  : > "$STDERR_FILE"
+  FAKE_ACTIVE=true
+  FAKE_STATUS='true\t9000\ttrue\ttrue\tfalse'
+  FAKE_DISPLAY_PREF=1
+  FAKE_OSASCRIPT_FAIL_MATCH=
+  export FAKE_ACTIVE FAKE_STATUS FAKE_DISPLAY_PREF FAKE_OSASCRIPT_FAIL_MATCH
+}
+
+run_cli() {
+  RUN_OUTPUT=$(/bin/bash "$CLI" "$@" 2>"$STDERR_FILE")
+  RUN_STATUS=$?
+}
+
+log_contents() {
+  LOG_CONTENTS=$(<"$AMPHETAMINE_TEST_LOG")
+}
+
+test_start_duration() {
+  reset_fakes
+  FAKE_DISPLAY_PREF=0
+  export FAKE_DISPLAY_PREF
+  run_cli start 2h
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'start 2h exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'start new session with options' 'start 2h uses options' || return
+  assert_contains "$LOG_CONTENTS" 'duration:2' 'start 2h uses duration 2' || return
+  assert_contains "$LOG_CONTENTS" 'interval:hours' 'start 2h uses hours' || return
+  assert_contains "$LOG_CONTENTS" 'displaySleepAllowed:false' 'start 2h uses the preference' || return
+  record_pass 'start 2h sends complete options with preference display state'
+}
+
+test_bare_start() {
+  reset_fakes
+  run_cli start
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'bare start exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'to start new session' 'bare start starts a session' || return
+  assert_not_contains "$LOG_CONTENTS" 'with options' 'bare start omits options' || return
+  assert_not_contains "$LOG_CONTENTS" 'defaults read' 'bare start does not read preferences' || return
+  record_pass 'bare start uses Amphetamine Preferences without an options record'
+}
+
+test_indefinite() {
+  reset_fakes
+  run_cli start --indefinite
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'indefinite start exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'duration:0' 'indefinite start uses duration zero' || return
+  assert_contains "$LOG_CONTENTS" 'interval:0' 'indefinite start uses interval zero' || return
+  record_pass 'indefinite start uses the documented zero values'
+}
+
+test_stop() {
+  reset_fakes
+  FAKE_STATUS='false\t-3\ttrue\ttrue\tfalse'
+  export FAKE_STATUS
+  run_cli stop
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'stop exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'to end session' 'stop ends the session' || return
+  assert_eq 'session:     inactive' "$RUN_OUTPUT" 'stop prints inactive status' || return
+  record_pass 'stop ends the session and reports inactive'
+}
+
+test_display_active() {
+  reset_fakes
+  run_cli display sleep
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'display sleep exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'to allow display sleep' 'display sleep invokes allow' || return
+
+  reset_fakes
+  run_cli display no-sleep
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'display no-sleep exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'to prevent display sleep' 'display no-sleep invokes prevent' || return
+  record_pass 'display modes mutate only an active session'
+}
+
+test_display_inactive() {
+  reset_fakes
+  FAKE_ACTIVE=false
+  export FAKE_ACTIVE
+  run_cli display sleep
+  log_contents
+  assert_eq 2 "$RUN_STATUS" 'inactive display exits 2' || return
+  assert_not_contains "$LOG_CONTENTS" 'to allow display sleep' 'inactive display does not invoke allow' || return
+  assert_not_contains "$LOG_CONTENTS" 'to prevent display sleep' 'inactive display does not invoke prevent' || return
+  record_pass 'display refuses an inactive session without changing Preferences'
+}
+
+test_duration_parser() {
+  reset_fakes
+  run_cli start 2h30m
+  log_contents
+  assert_eq 0 "$RUN_STATUS" 'combined duration exits successfully' || return
+  assert_contains "$LOG_CONTENTS" 'duration:150' 'combined duration becomes 150' || return
+  assert_contains "$LOG_CONTENTS" 'interval:minutes' 'combined duration uses minutes' || return
+
+  reset_fakes
+  run_cli start 90
+  assert_eq 2 "$RUN_STATUS" 'bare duration exits 2' || return
+  log_contents
+  assert_eq '' "$LOG_CONTENTS" 'bare duration does not invoke tools' || return
+
+  reset_fakes
+  run_cli start 0h
+  assert_eq 2 "$RUN_STATUS" 'zero hours exits 2' || return
+  log_contents
+  assert_eq '' "$LOG_CONTENTS" 'zero hours does not invoke tools' || return
+  record_pass 'duration parser accepts combined values and rejects invalid forms'
+}
+
+test_json() {
+  reset_fakes
+  run_cli status --json
+  assert_eq 0 "$RUN_STATUS" 'JSON status exits successfully' || return
+  assert_eq '' "$(<"$STDERR_FILE")" 'JSON status keeps stderr empty' || return
+  if ! printf '%s' "$RUN_OUTPUT" | python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+assert list(value) == ["active", "remaining_seconds", "display_sleep_allowed", "lid_close_keep_awake", "trigger"]
+assert value == {
+    "active": True,
+    "remaining_seconds": 9000,
+    "display_sleep_allowed": True,
+    "lid_close_keep_awake": True,
+    "trigger": False,
+}
+'; then
+    record_fail 'JSON output parses with the documented schema'
+    return
+  fi
+  record_pass 'JSON output parses with the documented schema'
+}
+
+test_failure_has_no_success_status() {
+  reset_fakes
+  FAKE_OSASCRIPT_FAIL_MATCH='start new session'
+  export FAKE_OSASCRIPT_FAIL_MATCH
+  run_cli start
+  assert_eq 1 "$RUN_STATUS" 'AppleScript failure exits 1' || return
+  assert_eq '' "$RUN_OUTPUT" 'AppleScript failure has no stdout status' || return
+  assert_not_contains "$(<"$STDERR_FILE")" 'session:' 'AppleScript failure has no success-like status' || return
+  record_pass 'AppleScript failures do not print a success-like status block'
+}
+
+test_install_copy() {
+  reset_fakes
+  if ! make -s -C "$ROOT" install PREFIX="$TEST_TMP/install"; then
+    record_fail 'make install completes'
+    return
+  fi
+  if [ -L "$TEST_TMP/install/bin/amphetamine" ] || [ ! -x "$TEST_TMP/install/bin/amphetamine" ]; then
+    record_fail 'make install creates an executable copy'
+    return
+  fi
+  if ! cmp -s "$CLI" "$TEST_TMP/install/bin/amphetamine"; then
+    record_fail 'make install preserves the binary contents'
+    return
+  fi
+  record_pass 'make install creates an executable copy under PREFIX/bin'
+}
+
+test_start_duration
+test_bare_start
+test_indefinite
+test_stop
+test_display_active
+test_display_inactive
+test_duration_parser
+test_json
+test_failure_has_no_success_status
+test_install_copy
+
+if [ "$failed" -ne 0 ]; then
+  printf '%d test(s) failed; %d passed\n' "$failed" "$passed" >&2
+  exit 1
+fi
+
+printf '1..%d\n' "$passed"

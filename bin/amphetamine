@@ -1,0 +1,408 @@
+#!/usr/bin/env bash
+
+# Amphetamine CLI: a macOS Bash 3.2-compatible wrapper around Amphetamine's
+# AppleScript dictionary.
+
+set -u
+
+APP_PATH=${AMPHETAMINE_APP_PATH:-/Applications/Amphetamine.app}
+PREF_DOMAIN=com.if.Amphetamine
+PREF_DISPLAY_SLEEP='Allow Display Sleep'
+
+usage() {
+  cat <<'EOF'
+Usage:
+  amphetamine [status] [--json]
+  amphetamine start [DURATION | --indefinite] [--display-sleep | --no-display-sleep] [--json]
+  amphetamine display <sleep | no-sleep> [--json]
+  amphetamine stop [--json]
+  amphetamine help
+
+Durations: 2h, 45m, or 2h30m (case-insensitive)
+EOF
+}
+
+error() {
+  printf 'amphetamine: %s\n' "$*" >&2
+}
+
+usage_error() {
+  error "$*"
+  printf "Try 'amphetamine help' for usage.\n" >&2
+  return 2
+}
+
+require_amphetamine() {
+  if [ ! -d "$APP_PATH" ]; then
+    error "Amphetamine.app was not found at $APP_PATH"
+    return 1
+  fi
+
+  if ! command -v osascript >/dev/null 2>&1; then
+    error 'osascript is not available'
+    return 1
+  fi
+}
+
+run_action() {
+  local script=$1
+
+  if ! osascript -e "$script" >/dev/null; then
+    error 'Amphetamine AppleScript command failed'
+    return 1
+  fi
+}
+
+query_active() {
+  local result
+
+  if ! result=$(osascript -e 'tell application "Amphetamine" to session is active'); then
+    error 'could not read Amphetamine session state'
+    return 1
+  fi
+
+  case "$result" in
+    true|false)
+      printf '%s\n' "$result"
+      ;;
+    *)
+      error "Amphetamine returned an invalid session state: $result"
+      return 1
+      ;;
+  esac
+}
+
+query_status() {
+  local script
+
+  script='tell application "Amphetamine"
+set activeState to session is active
+set remainingSeconds to session time remaining
+set displaySleepState to display sleep allowed
+set lidCloseState to closed display mode enabled
+set triggerState to session is Trigger
+return (activeState as string) & tab & (remainingSeconds as string) & tab & (displaySleepState as string) & tab & (lidCloseState as string) & tab & (triggerState as string)
+end tell'
+
+  if ! osascript -e "$script"; then
+    error 'could not read Amphetamine status'
+    return 1
+  fi
+}
+
+is_boolean() {
+  case "$1" in
+    true|false) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+print_status() {
+  local json=$1
+  local status_output active remaining display_sleep lid_close trigger
+  local total_minutes hours minutes remaining_label display_label lid_label
+
+  if ! status_output=$(query_status); then
+    return 1
+  fi
+
+  IFS=$'\t' read -r active remaining display_sleep lid_close trigger <<< "$status_output"
+
+  if ! is_boolean "$active" || ! is_boolean "$display_sleep" ||
+     ! is_boolean "$lid_close" || ! is_boolean "$trigger" ||
+     ! [[ "$remaining" =~ ^-?[0-9]+$ ]]; then
+    error "Amphetamine returned malformed status: $status_output"
+    return 1
+  fi
+
+  if [ "$json" = true ]; then
+    printf '{\n'
+    printf '  "active": %s,\n' "$active"
+    printf '  "remaining_seconds": %s,\n' "$remaining"
+    printf '  "display_sleep_allowed": %s,\n' "$display_sleep"
+    printf '  "lid_close_keep_awake": %s,\n' "$lid_close"
+    printf '  "trigger": %s\n' "$trigger"
+    printf '}\n'
+    return 0
+  fi
+
+  if [ "$active" = false ] || [ "$remaining" -eq -3 ]; then
+    printf 'session:     inactive\n'
+    return 0
+  fi
+
+  case "$remaining" in
+    0)
+      remaining_label=indefinite
+      ;;
+    -1)
+      remaining_label=trigger
+      ;;
+    -2)
+      remaining_label='until time/app'
+      ;;
+    *)
+      if [ "$remaining" -lt 0 ]; then
+        error "Amphetamine returned an unknown remaining-time value: $remaining"
+        return 1
+      fi
+      total_minutes=$((remaining / 60))
+      hours=$((total_minutes / 60))
+      minutes=$((total_minutes % 60))
+      remaining_label="${hours}h ${minutes}m"
+      ;;
+  esac
+
+  if [ "$display_sleep" = true ]; then
+    display_label='sleep allowed'
+  else
+    display_label='sleep prevented'
+  fi
+
+  if [ "$lid_close" = true ]; then
+    lid_label='keep awake'
+  else
+    lid_label='allow sleep'
+  fi
+
+  printf 'session:     active\n'
+  printf 'remaining:   %s\n' "$remaining_label"
+  printf 'display:     %s\n' "$display_label"
+  printf 'lid-close:   %s\n' "$lid_label"
+  printf 'trigger:     %s\n' "$(if [ "$trigger" = true ]; then printf yes; else printf no; fi)"
+}
+
+read_display_sleep_preference() {
+  local preference
+
+  if ! command -v defaults >/dev/null 2>&1; then
+    error 'defaults is not available'
+    return 1
+  fi
+
+  if ! preference=$(defaults read "$PREF_DOMAIN" "$PREF_DISPLAY_SLEEP"); then
+    error 'could not read Amphetamine display-sleep preference'
+    return 1
+  fi
+
+  case "$preference" in
+    1) printf 'true\n' ;;
+    0) printf 'false\n' ;;
+    *)
+      error "Amphetamine returned an invalid display-sleep preference: $preference"
+      return 1
+      ;;
+  esac
+}
+
+PARSED_DURATION=
+PARSED_INTERVAL=
+
+parse_duration() {
+  local raw=$1 normalized hours minutes
+
+  normalized=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+
+  if [[ "$normalized" =~ ^([1-9][0-9]*)h$ ]]; then
+    PARSED_DURATION=$((10#${BASH_REMATCH[1]}))
+    PARSED_INTERVAL=hours
+    return 0
+  fi
+
+  if [[ "$normalized" =~ ^([1-9][0-9]*)m$ ]]; then
+    PARSED_DURATION=$((10#${BASH_REMATCH[1]}))
+    PARSED_INTERVAL=minutes
+    return 0
+  fi
+
+  if [[ "$normalized" =~ ^([1-9][0-9]*)h([0-9]+)m$ ]]; then
+    hours=$((10#${BASH_REMATCH[1]}))
+    minutes=$((10#${BASH_REMATCH[2]}))
+    PARSED_DURATION=$((hours * 60 + minutes))
+    PARSED_INTERVAL=minutes
+    return 0
+  fi
+
+  return 1
+}
+
+parse_json_only() {
+  JSON_OUTPUT=false
+
+  if [ "$#" -gt 1 ]; then
+    usage_error 'too many arguments'
+    return 2
+  fi
+
+  if [ "$#" -eq 1 ]; then
+    if [ "$1" != --json ]; then
+      usage_error "unknown option: $1"
+      return 2
+    fi
+    JSON_OUTPUT=true
+  fi
+}
+
+command_status() {
+  parse_json_only "$@" || return $?
+  require_amphetamine || return 1
+  print_status "$JSON_OUTPUT"
+}
+
+command_start() {
+  local json=false duration_seen=false display_override='' display_sleep script
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json)
+        if [ "$json" = true ]; then
+          usage_error 'duplicate option: --json'
+          return 2
+        fi
+        json=true
+        ;;
+      --indefinite)
+        if [ "$duration_seen" = true ]; then
+          usage_error 'specify exactly one duration or --indefinite'
+          return 2
+        fi
+        duration_seen=true
+        PARSED_DURATION=0
+        PARSED_INTERVAL=0
+        ;;
+      --display-sleep)
+        if [ -n "$display_override" ]; then
+          usage_error 'specify only one display-sleep option'
+          return 2
+        fi
+        display_override=true
+        ;;
+      --no-display-sleep)
+        if [ -n "$display_override" ]; then
+          usage_error 'specify only one display-sleep option'
+          return 2
+        fi
+        display_override=false
+        ;;
+      --*)
+        usage_error "unknown option: $1"
+        return 2
+        ;;
+      *)
+        if [ "$duration_seen" = true ]; then
+          usage_error 'specify exactly one duration or --indefinite'
+          return 2
+        fi
+        if ! parse_duration "$1"; then
+          usage_error "invalid duration: $1"
+          return 2
+        fi
+        duration_seen=true
+        ;;
+    esac
+    shift
+  done
+
+  if [ "$duration_seen" = false ] && [ -n "$display_override" ]; then
+    usage_error 'a display-sleep option requires a duration or --indefinite'
+    return 2
+  fi
+
+  require_amphetamine || return 1
+
+  if [ "$duration_seen" = false ]; then
+    script='tell application "Amphetamine" to start new session'
+  else
+    if [ -n "$display_override" ]; then
+      display_sleep=$display_override
+    else
+      display_sleep=$(read_display_sleep_preference) || return 1
+    fi
+    script="tell application \"Amphetamine\" to start new session with options {duration:${PARSED_DURATION}, interval:${PARSED_INTERVAL}, displaySleepAllowed:${display_sleep}}"
+  fi
+
+  run_action "$script" || return 1
+  print_status "$json"
+}
+
+command_stop() {
+  parse_json_only "$@" || return $?
+  require_amphetamine || return 1
+  run_action 'tell application "Amphetamine" to end session' || return 1
+  print_status "$JSON_OUTPUT"
+}
+
+command_display() {
+  local mode json=false active script
+
+  if [ "$#" -lt 1 ]; then
+    usage_error 'display requires sleep or no-sleep'
+    return 2
+  fi
+
+  mode=$1
+  shift
+
+  if [ "$#" -gt 1 ]; then
+    usage_error 'too many arguments for display'
+    return 2
+  fi
+  if [ "$#" -eq 1 ]; then
+    if [ "$1" != --json ]; then
+      usage_error "unknown option: $1"
+      return 2
+    fi
+    json=true
+  fi
+
+  case "$mode" in
+    sleep) script='tell application "Amphetamine" to allow display sleep' ;;
+    no-sleep) script='tell application "Amphetamine" to prevent display sleep' ;;
+    *)
+      usage_error "unknown display mode: $mode"
+      return 2
+      ;;
+  esac
+
+  require_amphetamine || return 1
+  active=$(query_active) || return 1
+  if [ "$active" != true ]; then
+    error 'display can only be changed while a session is active'
+    return 2
+  fi
+
+  run_action "$script" || return 1
+  print_status "$json"
+}
+
+main() {
+  local command_name
+
+  if [ "$#" -eq 0 ]; then
+    command_status
+    return $?
+  fi
+
+  command_name=$1
+  shift
+
+  case "$command_name" in
+    status) command_status "$@" ;;
+    start) command_start "$@" ;;
+    stop) command_stop "$@" ;;
+    display) command_display "$@" ;;
+    help|-h|--help)
+      if [ "$#" -ne 0 ]; then
+        usage_error 'help does not accept arguments'
+        return 2
+      fi
+      usage
+      ;;
+    *)
+      usage_error "unknown command: $command_name"
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

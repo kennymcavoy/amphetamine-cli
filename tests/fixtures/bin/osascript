@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -u
+
+if [ "$#" -ne 2 ] || [ "$1" != -e ]; then
+  printf 'fake osascript: expected -e SCRIPT\n' >&2
+  exit 64
+fi
+
+script=$2
+printf '%s\n---\n' "$script" >> "$AMPHETAMINE_TEST_LOG"
+
+if [ -n "${FAKE_OSASCRIPT_FAIL_MATCH:-}" ]; then
+  case "$script" in
+    *"$FAKE_OSASCRIPT_FAIL_MATCH"*)
+      printf 'fake osascript failure\n' >&2
+      exit 1
+      ;;
+  esac
+fi
+
+case "$script" in
+  *'set activeState to session is active'*)
+    printf '%b\n' "${FAKE_STATUS:-true\t9000\ttrue\ttrue\tfalse}"
+    ;;
+  *'to session is active')
+    printf '%s\n' "${FAKE_ACTIVE:-true}"
+    ;;
+esac
