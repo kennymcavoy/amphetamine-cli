@@ -218,7 +218,7 @@ test_failure_has_no_success_status() {
   record_pass 'AppleScript failures do not print a success-like status block'
 }
 
-test_install_copy() {
+test_install_and_uninstall() {
   reset_fakes
   if ! make -s -C "$ROOT" install PREFIX="$TEST_TMP/install"; then
     record_fail 'make install completes'
@@ -232,7 +232,20 @@ test_install_copy() {
     record_fail 'make install preserves the binary contents'
     return
   fi
-  record_pass 'make install creates an executable copy under PREFIX/bin'
+  printf 'keep\n' > "$TEST_TMP/install/bin/keep-me"
+  if ! make -s -C "$ROOT" uninstall PREFIX="$TEST_TMP/install"; then
+    record_fail 'make uninstall completes'
+    return
+  fi
+  if [ -e "$TEST_TMP/install/bin/amphetamine" ]; then
+    record_fail 'make uninstall removes the installed binary'
+    return
+  fi
+  if [ ! -f "$TEST_TMP/install/bin/keep-me" ]; then
+    record_fail 'make uninstall preserves neighboring files'
+    return
+  fi
+  record_pass 'install copies the binary and uninstall removes only that binary'
 }
 
 test_start_duration
@@ -244,7 +257,7 @@ test_display_inactive
 test_duration_parser
 test_json
 test_failure_has_no_success_status
-test_install_copy
+test_install_and_uninstall
 
 if [ "$failed" -ne 0 ]; then
   printf '%d test(s) failed; %d passed\n' "$failed" "$passed" >&2

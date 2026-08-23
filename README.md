@@ -18,6 +18,28 @@ make install PREFIX=/your/prefix
 
 Make sure the selected `bin` directory is on `PATH`. On the first command, macOS may ask the calling terminal or agent app for permission to control Amphetamine; allow it under System Settings → Privacy & Security → Automation.
 
+## Uninstall
+
+From the source directory, remove the default installation with:
+
+```sh
+make uninstall
+```
+
+If you installed with a custom prefix, pass the same value when uninstalling:
+
+```sh
+make uninstall PREFIX=/your/prefix
+```
+
+Without the source directory, the equivalent default removal is:
+
+```sh
+rm -f "$HOME/.local/bin/amphetamine"
+```
+
+Uninstall removes only the `amphetamine` executable. It leaves the containing `bin` directory, Amphetamine.app, Amphetamine Preferences, and macOS Automation permissions unchanged.
+
 ## Commands
 
 | # | Command | Effect |
