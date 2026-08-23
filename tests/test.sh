@@ -336,34 +336,138 @@ test_mutating_json_contract() {
   record_pass 'all mutating commands return the JSON status contract'
 }
 
-test_install_and_uninstall() {
+test_portable_install_and_uninstall() {
   reset_fakes
-  if ! make -s -C "$ROOT" install PREFIX="$TEST_TMP/install"; then
+  local portable_home=$TEST_TMP/portable-home
+  local installed_binary=$portable_home/.local/bin/amphetamine
+  local installed_skill=$portable_home/.agents/skills/amphetamine/SKILL.md
+  local claude_link=$portable_home/.claude/skills/amphetamine
+
+  if ! make -s -C "$ROOT" install HOME="$portable_home"; then
     record_fail 'make install completes'
     return
   fi
-  if [ -L "$TEST_TMP/install/bin/amphetamine" ] || [ ! -x "$TEST_TMP/install/bin/amphetamine" ]; then
+  if [ -L "$installed_binary" ] || [ ! -x "$installed_binary" ]; then
     record_fail 'make install creates an executable copy'
     return
   fi
-  if ! cmp -s "$CLI" "$TEST_TMP/install/bin/amphetamine"; then
+  if ! cmp -s "$CLI" "$installed_binary"; then
     record_fail 'make install preserves the binary contents'
     return
   fi
-  printf 'keep\n' > "$TEST_TMP/install/bin/keep-me"
-  if ! make -s -C "$ROOT" uninstall PREFIX="$TEST_TMP/install"; then
+  if [ -L "${installed_skill%/*}" ] || ! cmp -s "$ROOT/skill/SKILL.md" "$installed_skill"; then
+    record_fail 'make install creates a self-contained canonical skill copy'
+    return
+  fi
+  if ! make -s -C "$ROOT" install-claude-skill HOME="$portable_home"; then
+    record_fail 'make install-claude-skill completes'
+    return
+  fi
+  if ! make -s -C "$ROOT" install-claude-skill HOME="$portable_home"; then
+    record_fail 'repeated Claude skill installation is idempotent'
+    return
+  fi
+  if [ ! -L "$claude_link" ] || [ "$(readlink "$claude_link")" != "${installed_skill%/*}" ]; then
+    record_fail 'Claude skill link points to the canonical installed skill'
+    return
+  fi
+
+  printf 'keep\n' > "$portable_home/.local/bin/keep-me"
+  printf 'keep\n' > "$portable_home/.agents/skills/keep-me"
+  printf 'keep\n' > "$portable_home/.claude/skills/keep-me"
+  if ! make -s -C "$ROOT" uninstall HOME="$portable_home"; then
     record_fail 'make uninstall completes'
     return
   fi
-  if [ -e "$TEST_TMP/install/bin/amphetamine" ]; then
-    record_fail 'make uninstall removes the installed binary'
+  if [ -e "$installed_binary" ] || [ -e "$installed_skill" ] || [ -L "$claude_link" ]; then
+    record_fail 'make uninstall removes the installed artifacts'
     return
   fi
-  if [ ! -f "$TEST_TMP/install/bin/keep-me" ]; then
+  if [ ! -f "$portable_home/.local/bin/keep-me" ] ||
+     [ ! -f "$portable_home/.agents/skills/keep-me" ] ||
+     [ ! -f "$portable_home/.claude/skills/keep-me" ]; then
     record_fail 'make uninstall preserves neighboring files'
     return
   fi
-  record_pass 'install copies the binary and uninstall removes only that binary'
+  record_pass 'portable install and uninstall manage binary and skill without source links'
+}
+
+test_custom_prefix_install() {
+  reset_fakes
+  local custom_home=$TEST_TMP/custom-home
+  local custom_prefix=$TEST_TMP/custom-prefix
+
+  if ! make -s -C "$ROOT" install HOME="$custom_home" PREFIX="$custom_prefix"; then
+    record_fail 'custom-prefix install completes'
+    return
+  fi
+  if [ ! -x "$custom_prefix/bin/amphetamine" ] ||
+     [ ! -f "$custom_home/.agents/skills/amphetamine/SKILL.md" ]; then
+    record_fail 'custom-prefix install separates binary and user skill destinations'
+    return
+  fi
+  if ! make -s -C "$ROOT" uninstall HOME="$custom_home" PREFIX="$custom_prefix"; then
+    record_fail 'custom-prefix uninstall completes'
+    return
+  fi
+  if [ -e "$custom_prefix/bin/amphetamine" ] ||
+     [ -e "$custom_home/.agents/skills/amphetamine/SKILL.md" ]; then
+    record_fail 'custom-prefix uninstall removes both installed artifacts'
+    return
+  fi
+  record_pass 'custom PREFIX changes the binary destination without losing skill discovery'
+}
+
+test_claude_skill_conflict() {
+  reset_fakes
+  local conflict_home=$TEST_TMP/conflict-home
+  local conflict_path=$conflict_home/.claude/skills/amphetamine
+
+  mkdir -p "$conflict_path"
+  printf 'owned elsewhere\n' > "$conflict_path/keep-me"
+  if make -s -C "$ROOT" install-claude-skill HOME="$conflict_home" > /dev/null 2>"$TEST_TMP/claude-conflict.err"; then
+    record_fail 'Claude skill installation rejects an existing destination'
+    return
+  fi
+  if [ ! -f "$conflict_home/.agents/skills/amphetamine/SKILL.md" ]; then
+    record_fail 'Claude conflict check still installs the canonical user skill'
+    return
+  fi
+  if [ ! -f "$conflict_path/keep-me" ]; then
+    record_fail 'Claude skill conflict preserves the existing destination'
+    return
+  fi
+  record_pass 'Claude compatibility install refuses to overwrite an existing skill'
+}
+
+test_canonical_skill_conflict() {
+  reset_fakes
+  local conflict_home=$TEST_TMP/canonical-conflict-home
+  local conflict_skill=$conflict_home/.agents/skills/amphetamine/SKILL.md
+  local conflict_link=$conflict_home/.claude/skills/amphetamine
+
+  mkdir -p "${conflict_skill%/*}"
+  mkdir -p "${conflict_link%/*}"
+  printf 'owned elsewhere\n' > "$conflict_skill"
+  ln -s "${conflict_skill%/*}" "$conflict_link"
+  if make -s -C "$ROOT" install HOME="$conflict_home" > /dev/null 2>"$TEST_TMP/canonical-conflict.err"; then
+    record_fail 'canonical skill installation rejects an unowned destination'
+    return
+  fi
+  if [ "$(<"$conflict_skill")" != 'owned elsewhere' ] ||
+     [ -e "$conflict_home/.local/bin/amphetamine" ]; then
+    record_fail 'canonical skill conflict preserves existing state without a partial binary install'
+    return
+  fi
+  if make -s -C "$ROOT" uninstall HOME="$conflict_home" > /dev/null 2>"$TEST_TMP/canonical-uninstall-conflict.err"; then
+    record_fail 'canonical skill uninstall rejects an unowned destination'
+    return
+  fi
+  if [ ! -L "$conflict_link" ] || [ ! -f "$conflict_skill" ]; then
+    record_fail 'canonical skill uninstall preserves an unowned skill and discovery link'
+    return
+  fi
+  record_pass 'canonical skill install and uninstall refuse unowned state without partial changes'
 }
 
 test_version_without_app
@@ -381,7 +485,10 @@ test_missing_app_failure
 test_defaults_failure
 test_malformed_status_failure
 test_mutating_json_contract
-test_install_and_uninstall
+test_portable_install_and_uninstall
+test_custom_prefix_install
+test_claude_skill_conflict
+test_canonical_skill_conflict
 
 if [ "$failed" -ne 0 ]; then
   printf '%d test(s) failed; %d passed\n' "$failed" "$passed" >&2

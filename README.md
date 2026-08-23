@@ -6,17 +6,40 @@ This is an unofficial CLI and requires the Amphetamine app from the Mac App Stor
 
 ## Install
 
+Clone the repository, then install from its root:
+
 ```sh
+git clone https://github.com/kennymcavoy/amphetamine-cli.git
+cd amphetamine-cli
 make install
 ```
 
-This copies `bin/amphetamine` to `~/.local/bin/amphetamine`. Set `PREFIX` to install elsewhere:
+The default installation creates a self-contained CLI and agent skill in your home directory:
+
+- `~/.local/bin/amphetamine` — the CLI executable
+- `~/.agents/skills/amphetamine/SKILL.md` — the Codex agent skill
+
+The skill directory also contains a small ownership marker so uninstall can distinguish this project's files from somebody else's. Nothing links back to the cloned repository, so you can remove the clone after installation. Restart Codex if the new skill is not discovered in an existing session.
+
+To make the same installed skill available to Claude Code without maintaining a second copy, add its discovery link:
+
+```sh
+make install-claude-skill
+```
+
+This creates `~/.claude/skills/amphetamine` as a symlink to the canonical skill under `~/.agents/skills`. It refuses to replace an existing file, directory, or different symlink at that location.
+
+Set `PREFIX` to install the executable elsewhere:
 
 ```sh
 make install PREFIX=/your/prefix
 ```
 
-Make sure the selected `bin` directory is on `PATH`. On the first command, macOS may ask the calling terminal or agent app for permission to control Amphetamine; allow it under System Settings → Privacy & Security → Automation.
+The skill remains in the standard user discovery directory. Advanced installations can override `SKILLSDIR` and `CLAUDE_SKILLSDIR`; pass those same values to later install and uninstall commands.
+
+Make sure the selected `bin` directory is on `PATH`. On the first CLI command, macOS may ask the calling terminal or agent app for permission to control Amphetamine; allow it under System Settings → Privacy & Security → Automation.
+
+The repository's `AGENTS.md` is development guidance and is not installed. Agent-facing CLI instructions come from the installed `SKILL.md`.
 
 ## Uninstall
 
@@ -32,13 +55,29 @@ If you installed with a custom prefix, pass the same value when uninstalling:
 make uninstall PREFIX=/your/prefix
 ```
 
-Without the source directory, the equivalent default removal is:
+`make uninstall` removes the executable, the skill installed by this project, and the exact Claude discovery link if you created it. It refuses to remove a skill directory that it did not install.
+
+Without the source directory, the equivalent safe removal for a default installation is:
 
 ```sh
+skill_dir="$HOME/.agents/skills/amphetamine"
+claude_link="$HOME/.claude/skills/amphetamine"
+
+if [ -f "$skill_dir/.installed-by-amphetamine-cli" ] &&
+   [ -L "$claude_link" ] &&
+   [ "$(readlink "$claude_link")" = "$skill_dir" ]; then
+  rm -f "$claude_link"
+fi
+
 rm -f "$HOME/.local/bin/amphetamine"
+
+if [ -f "$skill_dir/.installed-by-amphetamine-cli" ]; then
+  rm -f "$skill_dir/SKILL.md" "$skill_dir/.installed-by-amphetamine-cli"
+  rmdir "$skill_dir" 2>/dev/null || true
+fi
 ```
 
-Uninstall removes only the `amphetamine` executable. It leaves the containing `bin` directory, Amphetamine.app, Amphetamine Preferences, and macOS Automation permissions unchanged.
+Uninstall leaves containing directories, neighboring files and skills, Amphetamine.app, Amphetamine Preferences, and macOS Automation permissions unchanged.
 
 ## Commands
 
